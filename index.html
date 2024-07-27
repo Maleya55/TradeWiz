@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Trading Analysis Tool</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f0f0f0; }
+        select, button { margin: 10px 0; padding: 10px; width: 100%; font-size: 16px; }
+        #liveData, #predictions, #performanceMetrics { margin-top: 20px; background-color: white; padding: 15px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .prediction-box { border: 1px solid #ccc; padding: 15px; margin-top: 15px; border-radius: 5px; }
+        .high-confidence { background-color: #e6ffe6; border-left: 5px solid #4CAF50; }
+        .medium-confidence { background-color: #fff5e6; border-left: 5px solid #FFA500; }
+        .low-confidence { background-color: #ffe6e6; border-left: 5px solid #F44336; }
+        table { border-collapse: collapse; width: 100%; margin-top: 10px; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .over-under-container { display: flex; flex-wrap: wrap; gap: 15px; }
+        .over-prediction, .under-prediction { flex: 1; min-width: 250px; }
+        #connectionStatus { padding: 10px; margin-bottom: 10px; border-radius: 5px; font-weight: bold; }
+        .connected { background-color: #e6ffe6; color: #4CAF50; }
+        .disconnected { background-color: #ffe6e6; color: #F44336; }
+        h1, h2, h3, h4 { color: #333; }
+        @media (max-width: 600px) {
+            .over-under-container { flex-direction: column; }
+            .over-prediction, .under-prediction { width: 100%; }
+        }
+    </style>
+</head>
+<body>
+    <h1>Advanced Trading Analysis Tool</h1>
+    <div id="connectionStatus" class="disconnected">Disconnected</div>
+    <select id="volatilitySelect">
+        <option value="10">Volatility 10 (1s)</option>
+        <option value="25">Volatility 25 (1s)</option>
+        <option value="50">Volatility 50 (1s)</option>
+        <option value="75">Volatility 75 (1s)</option>
+        <option value="100">Volatility 100 (1s)</option>
+    </select>
+    <select id="marketSelect">
+        <option value="rise_fall">Rise/Fall</option>
+        <option value="over_under">Over/Under</option>
+        <option value="digit_match">Digit Match / Exact Digit</option>
+        <option value="even_odd">Even/Odd</option>
+        <option value="differs">Differs</option>
+    </select>
+    <div id="liveData"></div>
+    <div id="predictions"></div>
+    <div id="performanceMetrics"></div>
+
+    <script>
+        const app_id = 61507;
+        let websocket;
+        let historicalData = [];
+        let predictionResults = {
+            rise_fall: { correct: 0, total: 0 },
+            over_under: { correct: 0, total: 0 },
+            digit_match: { correct: 0, total: 0 },
+            even_odd: { correct: 0, total: 0 },
+            differs: { correct: 0, total: 0 }
+        };
+        let lastPredictions = {};
+        let cachedData = [];
+
+        function initWebSocket() {
+            websocket = new WebSocket(`wss://ws.derivws.com/websockets/v3?app_id=${app_id}`);
+
+            websocket.addEventListener('open', (event) => {
+                console.log('WebSocket connection established');
+                document.getElementById('connectionStatus').className = 'connected';
+                document.getElementById('connectionStatus').innerText = 'Connected';
+                subscribeToTicks();
+                sendPing();
+            });
+
+            websocket.addEventListener('message', (event) => {
+                const data = JSON.parse(event.data);
+                handleMessage(data);
+            });
+
+            websocket.addEventListener('close', (event) => {
+                console.log('WebSocket connection closed');
+                document.getElementById('connectionStatus').className = 'disconnected';
+                document.getElementById('connectionStatus').innerText = 'Disconnected';
+                setTimeout(initWebSocket, 5000);
+            });
+
+            websocket.addEventListener('error', (event) => {
+                console.error('WebSocket error:', event);
+                document.getElementById('connectionStatus').className = 'disconnected';
+                document.getElementById('connectionStatus').innerText = 'Connection Error';
+            });
+        }
+
+        function sendPing() {
+            if (websocket.readyState === WebSocket.OPEN) {
+                websocket.send(JSON.stringify({ ping: 1 }));
+                setTimeout(sendPing, 12000);
+            }
+        }
+
+        function subscribeToTicks() {
+            const volatility = document.getElementById('volatilitySelect').value;
+            const symbol = `R_${volatility}`;
+            websocket.send(JSON.stringify({
+                ticks: symbol,
+                subscribe: 1
+            }));
+        }
+
+        function handleMessage(data) {
+            if (data.tick) {
+                updateHistoricalData(data.tick);
+                updateLiveData(data.tick);
+                updatePredictions();
+                checkPredictionAccuracy(data.tick);
+                updatePerformanceMetrics();
+            }
+        }
+
+        function updateHistoricalData(tick) {
+            historicalData.push(tick);
+            if (historicalData.length > 1000) historicalData.shift();
+            
+            cachedData.push(tick);
+            if (cachedData.length > 5000) cachedData.shift();
+            localStorage.setItem('cachedData', JSON.stringify(cachedData));
+        }
+
+        function updateLiveData(tick) {
+            const liveDataElement = document.getElementById('liveData');
+            liveDataElement.innerHTML = `
+                <h2>Live Data</h2>
+                <p><strong>Current Price:</strong> ${tick.quote}</p>
+                <p><strong>Timestamp:</strong> ${new Date(tick.epoch * 1000).toLocaleTimeString()}</p>
+            `;
+        }
+
+        function updatePredictions() {
+            const predictionsElement = document.getElementById('predictions');
+            const selectedMarket = document.getElementById('marketSelect').value;
+
+            let predictionHtml = '<h2>Predictions</h2><div class="prediction-box">';
+            
+            switch(selectedMarket) {
+                case 'rise_fall':
+                    predictionHtml += generateRiseFallPrediction();
+                    break;
+                case 'over_under':
+                    predictionHtml += generateOverUnderPrediction();
+                    break;
+                case 'digit_match':
+                    predictionHtml += generateDigitMatchPrediction();
+                    break;
+                case 'even_odd':
+                    predictionHtml += generateEvenOddPrediction();
+                    break;
+                case 'differs':
+                    predictionHtml += generateDiffersPrediction();
+                    break;
+            }
+
+            predictionHtml += '</div>';
+            predictionsElement.innerHTML = predictionHtml;
+        }
+
+        function generateRiseFallPrediction() {
+            const recentPrices = historicalData.slice(-200).map(d => d.quote);
+            const priceChanges = recentPrices.slice(1).map((price, index) => price - recentPrices[index]);
+            
+            const weightedChanges = priceChanges.map((change, index) => ({
+                change,
+                weight: Math.exp(-index / 100)  // Time-weighted factor
+            }));
+
+            const risesCount = weightedChanges.reduce((sum, item) => sum + (item.change > 0 ? item.weight : 0), 0);
+            const fallsCount = weightedChanges.reduce((sum, item) => sum + (item.change < 0 ? item.weight : 0), 0);
+            
+            const totalWeight = weightedChanges.reduce((sum, item) => sum + item.weight, 0);
+            const risePercentage = (risesCount / totalWeight) * 100;
+            const fallPercentage = (fallsCount / totalWeight) * 100;
+
+            let prediction, confidence, duration;
+
+            if (risePercentage > 60) {
+                prediction = 'Rise';
+                confidence = risePercentage > 70 ? 'high-confidence' : 'medium-confidence';
+                duration = risePercentage > 70 ? '3 minutes' : '5 minutes';
+            } else if (fallPercentage > 60) {
+                prediction = 'Fall';
+                confidence = fallPercentage > 70 ? 'high-confidence' : 'medium-confidence';
+                duration = fallPercentage > 70 ? '3 minutes' : '5 minutes';
+            } else {
+                prediction = 'No clear trend';
+                confidence = 'low-confidence';
+                duration = 'Not recommended';
+            }
+
+            lastPredictions.rise_fall = prediction;
+
+            return `
+                <h3>Rise/Fall Prediction</h3>
+                <p class="${confidence}"><strong>Prediction:</strong> ${prediction}</p>
+                <p><strong>Suggested duration:</strong> ${duration}</p>
+                <p><strong>Rise percentage:</strong> ${risePercentage.toFixed(2)}%</p>
+                <p><strong>Fall percentage:</strong> ${fallPercentage.toFixed(2)}%</p>
+            `;
+        }
+
+        function generateOverUnderPrediction() {
+            const lastDigits = historicalData.slice(-500).map(d => parseInt(d.quote.toString().slice(-1)));
+            const overCounts = Array(8).fill(0);
+            
+            lastDigits.forEach(digit => {
+                for (let i = 0; i < 8; i++) {
+                    if (digit > i + 1) overCounts[i]++;
+                }
+            });
+            
+            const overPercentages = overCounts.map(count => (count / lastDigits.length) * 100);
+            const underPercentages = overPercentages.map(percentage => 100 - percentage);
+            
+            let predictionHtml = '<h3>Over/Under Prediction</h3><div class="over-under-container">';
+            
+            // Over predictions
+            predictionHtml += '<div class="over-prediction"><h4>Over Predictions</h4><table><tr><th>Number</th><th>Over %</th></tr>';
+            for (let i = 1; i <= 8; i++) {
+                const overPercentage = overPercentages[i-1].toFixed(2);
+                let overClass = getConfidenceClass(overPercentage, i);
+
+                predictionHtml += `<tr>
+                    <td>${i}</td>
+                    <td class="${overClass}">${overPercentage}%</td>
+                </tr>`;
+            }
+            predictionHtml += '</table></div>';
+
+            // Under predictions
+            predictionHtml += '<div class="under-prediction"><h4>Under Predictions</h4><table><tr><th>Number</th><th>Under %</th></tr>';
+            for (let i = 1; i <= 8; i++) {
+                const underPercentage = underPercentages[i-1].toFixed(2);
+                let underClass = getConfidenceClass(underPercentage, i);
+
+                predictionHtml += `<tr>
+                    <td>${i}</td>
+                    <td class="${underClass}">${underPercentage}%</td>
+                </tr>`;
+            }
+            predictionHtml += '</table></div></div>';
+            
+            // Focus on specific numbers
+            predictionHtml += '<h4>Focused Predictions</h4>';
+            predictionHtml += generateFocusedOverUnderPrediction(3, overPercentages[2]);
+            predictionHtml += generateFocusedOverUnderPrediction(4, overPercentages[3]);
+            predictionHtml += generateFocusedOverUnderPrediction(6, underPercentages[5]);
+            predictionHtml += generateFocusedOverUnderPrediction(7, underPercentages[6]);
+            
+            // Best overall prediction
+            let bestPrediction = { number: 0, isOver: true, percentage: 50 };
+            
+            for (let i = 0; i < 8; i++) {
+                if (overPercentages[i] > bestPrediction.percentage) {
+                    bestPrediction = { number: i + 1, isOver: true, percentage: overPercentages[i] };
+                }
+                if (underPercentages[i] > bestPrediction.percentage) {
+                    bestPrediction = { number: i + 1, isOver: false, percentage: underPercentages[i] };
+                }
+            }
+            
+            const prediction = bestPrediction.isOver ? `Over ${bestPrediction.number}` : `Under ${bestPrediction.number}`;
+            const confidenceClass = getConfidenceClass(bestPrediction.percentage, bestPrediction.number);
+            
+            lastPredictions.over_under = prediction;
+
+            predictionHtml += `
+                <h4>Best Overall Prediction</h4>
+                <p class="${confidenceClass}"><strong>Prediction:</strong> ${prediction}</p>
+                <p><strong>Probability:</strong> ${bestPrediction.percentage.toFixed(2)}%</p>
+            `;
+
+            return predictionHtml;
+        }
+
+        function generateFocusedOverUnderPrediction(number, percentage) {
+            const isOver = number <= 4;
+            const prediction = isOver ? `Over ${number}` : `Under ${number}`;
+            const confidenceClass = getConfidenceClass(percentage, number);
+            const duration = confidenceClass === 'high-confidence' ? '3 minutes' : '5 minutes';
+
+            return `
+                <div class="prediction-box ${confidenceClass}">
+                    <p><strong>Prediction:</strong> ${prediction}</p>
+                    <p><strong>Probability:</strong> ${percentage.toFixed(2)}%</p>
+                    <p><strong>Suggested duration:</strong> ${duration}</p>
+                </div>
+            `;
+        }
+
+        function getConfidenceClass(percentage, number) {
+            if (number <= 4) {
+                return percentage >= 85 ? 'high-confidence' : (percentage >= 60 ? 'medium-confidence' : 'low-confidence');
+            } else {
+                return percentage >= 70 ? 'high-confidence' : (percentage >= 55 ? 'medium-confidence' : 'low-confidence');
+            }
+        }
+
+        function generateDigitMatchPrediction() {
+            const lastDigits = historicalData.slice(-300).map(d => parseInt(d.quote.toString().slice(-1)));
+            const digitCounts = Array(10).fill(0);
+            lastDigits.forEach((digit, index) => {
+                const weight = Math.exp(-index / 150);  // Time-weighted factor
+                digitCounts[digit] += weight;
+            });
+            const totalWeight = lastDigits.reduce((sum, _, index) => sum + Math.exp(-index / 150), 0);
+        const digitPercentages = digitCounts.map(count => (count / totalWeight) * 100);
+        
+        let predictionHtml = '<h3>Digit Match / Exact Digit Prediction</h3><table><tr><th>Digit</th><th>Percentage</th></tr>';
+        
+        for (let i = 0; i <= 9; i++) {
+            const percentage = digitPercentages[i].toFixed(2);
+            let confidenceClass = percentage >= 15 ? 'high-confidence' : (percentage >= 10 ? 'medium-confidence' : 'low-confidence');
+            predictionHtml += `<tr>
+                <td>${i}</td>
+                <td class="${confidenceClass}">${percentage}%</td>
+            </tr>`;
+        }
+        
+        predictionHtml += '</table>';
+        
+        const mostLikelyDigit = digitPercentages.indexOf(Math.max(...digitPercentages));
+        const confidence = digitPercentages[mostLikelyDigit] >= 15 ? 'high-confidence' : (digitPercentages[mostLikelyDigit] >= 10 ? 'medium-confidence' : 'low-confidence');
+        const duration = digitPercentages[mostLikelyDigit] >= 15 ? '3 minutes' : '5 minutes';
+
+        lastPredictions.digit_match = mostLikelyDigit;
+
+        predictionHtml += `
+            <p class="${confidence}"><strong>Most likely digit:</strong> ${mostLikelyDigit}</p>
+            <p><strong>Suggested duration:</strong> ${duration}</p>
+            <p><strong>Probability:</strong> ${digitPercentages[mostLikelyDigit].toFixed(2)}%</p>
+        `;
+
+        return predictionHtml;
+    }
+
+    function generateEvenOddPrediction() {
+        const lastDigits = historicalData.slice(-200).map(d => parseInt(d.quote.toString().slice(-1)));
+        let evenCount = 0;
+        let totalWeight = 0;
+        lastDigits.forEach((digit, index) => {
+            const weight = Math.exp(-index / 100);  // Time-weighted factor
+            if (digit % 2 === 0) evenCount += weight;
+            totalWeight += weight;
+        });
+        const evenPercentage = (evenCount / totalWeight) * 100;
+        const oddPercentage = 100 - evenPercentage;
+        
+        let prediction, confidence, duration;
+
+        if (evenPercentage >= 55) {
+            prediction = 'Even';
+            confidence = evenPercentage >= 60 ? 'high-confidence' : 'medium-confidence';
+            duration = evenPercentage >= 60 ? '3 minutes' : '5 minutes';
+        } else if (oddPercentage >= 55) {
+            prediction = 'Odd';
+            confidence = oddPercentage >= 60 ? 'high-confidence' : 'medium-confidence';
+            duration = oddPercentage >= 60 ? '3 minutes' : '5 minutes';
+        } else {
+            prediction = evenPercentage > oddPercentage ? 'Even' : 'Odd';
+            confidence = 'low-confidence';
+            duration = 'Not recommended';
+        }
+
+        lastPredictions.even_odd = prediction;
+
+        return `
+            <h3>Even/Odd Prediction</h3>
+            <p class="${confidence}"><strong>Prediction:</strong> ${prediction}</p>
+            <p><strong>Suggested duration:</strong> ${duration}</p>
+            <p><strong>Even percentage:</strong> ${evenPercentage.toFixed(2)}%</p>
+            <p><strong>Odd percentage:</strong> ${oddPercentage.toFixed(2)}%</p>
+        `;
+    }
+
+    function generateDiffersPrediction() {
+        const lastDigits = historicalData.slice(-300).map(d => parseInt(d.quote.toString().slice(-1)));
+        const digitCounts = Array(10).fill(0);
+        lastDigits.forEach((digit, index) => {
+            const weight = Math.exp(-index / 150);  // Time-weighted factor
+            digitCounts[digit] += weight;
+        });
+        const totalWeight = lastDigits.reduce((sum, _, index) => sum + Math.exp(-index / 150), 0);
+        const digitPercentages = digitCounts.map(count => (count / totalWeight) * 100);
+        
+        const leastLikelyDigit = digitPercentages.indexOf(Math.min(...digitPercentages));
+        const differPercentage = 100 - digitPercentages[leastLikelyDigit];
+        
+        const confidence = differPercentage >= 97 ? 'high-confidence' : (differPercentage >= 90 ? 'medium-confidence' : 'low-confidence');
+        const duration = differPercentage >= 97 ? '3 minutes' : (differPercentage >= 90 ? '5 minutes' : 'Not recommended');
+
+        lastPredictions.differs = leastLikelyDigit;
+
+        return `
+            <h3>Differs Prediction</h3>
+            <p class="${confidence}"><strong>Most likely to differ:</strong> ${leastLikelyDigit}</p>
+            <p><strong>Suggested duration:</strong> ${duration}</p>
+            <p><strong>Differ percentage:</strong> ${differPercentage.toFixed(2)}%</p>
+        `;
+    }
+
+    function checkPredictionAccuracy(tick) {
+        const lastDigit = parseInt(tick.quote.toString().slice(-1));
+        const previousQuote = historicalData[historicalData.length - 2]?.quote;
+
+        if (lastPredictions.rise_fall) {
+            predictionResults.rise_fall.total++;
+            if ((lastPredictions.rise_fall === 'Rise' && tick.quote > previousQuote) ||
+                (lastPredictions.rise_fall === 'Fall' && tick.quote < previousQuote)) {
+                predictionResults.rise_fall.correct++;
+            }
+        }
+
+        if (lastPredictions.over_under) {
+            predictionResults.over_under.total++;
+            const [prediction, number] = lastPredictions.over_under.split(' ');
+            if ((prediction === 'Over' && lastDigit > parseInt(number)) ||
+                (prediction === 'Under' && lastDigit < parseInt(number))) {
+                predictionResults.over_under.correct++;
+            }
+        }
+
+        if (lastPredictions.digit_match !== undefined) {
+            predictionResults.digit_match.total++;
+            if (lastDigit === lastPredictions.digit_match) {
+                predictionResults.digit_match.correct++;
+            }
+        }
+
+        if (lastPredictions.even_odd) {
+            predictionResults.even_odd.total++;
+            if ((lastPredictions.even_odd === 'Even' && lastDigit % 2 === 0) ||
+                (lastPredictions.even_odd === 'Odd' && lastDigit % 2 !== 0)) {
+                predictionResults.even_odd.correct++;
+            }
+        }
+
+        if (lastPredictions.differs !== undefined) {
+            predictionResults.differs.total++;
+            if (lastDigit !== lastPredictions.differs) {
+                predictionResults.differs.correct++;
+            }
+        }
+    }
+
+    function updatePerformanceMetrics() {
+        const metricsElement = document.getElementById('performanceMetrics');
+        let metricsHtml = '<h2>Performance Metrics</h2><table><tr><th>Market</th><th>Accuracy</th><th>Correct</th><th>Total</th></tr>';
+        for (const [market, results] of Object.entries(predictionResults)) {
+            const accuracy = results.total > 0 ? (results.correct / results.total * 100).toFixed(2) : 'N/A';
+            metricsHtml += `<tr>
+                <td>${market.replace('_', ' ')}</td>
+                <td>${accuracy}%</td>
+                <td>${results.correct}</td>
+                <td>${results.total}</td>
+            </tr>`;
+        }
+        metricsHtml += '</table>';
+        metricsElement.innerHTML = metricsHtml;
+    }
+
+    document.getElementById('volatilitySelect').addEventListener('change', subscribeToTicks);
+    document.getElementById('marketSelect').addEventListener('change', updatePredictions);
+
+    // Initialize WebSocket connection
+    initWebSocket();
+
+    // Load cached data on startup
+    const cachedDataString = localStorage.getItem('cachedData');
+    if (cachedDataString) {
+        cachedData = JSON.parse(cachedDataString);
+        historicalData = cachedData.slice(-1000);
+        if (historicalData.length > 0) {
+            updateLiveData(historicalData[historicalData.length - 1]);
+            updatePredictions();
+            updatePerformanceMetrics();
+        }
+    }
+</script>
+</body>
+</html>
